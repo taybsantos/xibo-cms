@@ -1,6 +1,6 @@
 <?php
 /*
- * Copyright (C) 2025 Xibo Signage Ltd
+ * Copyright (C) 2026 Xibo Signage Ltd
  *
  * Xibo - Digital Signage - https://xibosignage.com
  *
@@ -23,6 +23,7 @@ namespace Xibo\XTR;
 
 use Carbon\Carbon;
 use GuzzleHttp\Client;
+use Xibo\Helper\Guzzle\SafeClient;
 use GuzzleHttp\Exception\GuzzleException;
 use Xibo\Controller\Display;
 use Xibo\Event\DisplayGroupLoadEvent;
@@ -151,7 +152,29 @@ class MaintenanceRegularTask implements TaskInterface
     {
         $this->runMessage .= '## ' . __('Email Alerts') . PHP_EOL;
 
-        $this->displayController->validateDisplays($this->displayFactory->query());
+        // Process the validation by batch
+        $batchSize = 100;
+        $offset = 0;
+
+        while (true) {
+            $displays = $this->displayFactory->query(null, [
+                'start' => $offset,
+                'length' => $batchSize
+            ]);
+
+            if (empty($displays)) {
+                break;
+            }
+
+            $this->log->debug('XTR: validating displayId: %d-%d', $offset + 1, $offset + count($displays));
+
+            $this->displayController->validateDisplays($displays);
+
+            // Free the $displays array memory
+            unset($displays);
+
+            $offset += $batchSize;
+        }
 
         $this->appendRunMessage(__('Done'));
     }
@@ -633,7 +656,10 @@ class MaintenanceRegularTask implements TaskInterface
         try {
             $key = $this->getConfig()->getSetting('XMR_CMS_KEY');
             if (!empty($key)) {
-                $client = new Client($this->config->getGuzzleProxy([
+                // XMR is by-design on the local network — see the note on
+                // PlayerActionService::processQueue. Use the internal-services
+                // SafeClient variant.
+                $client = SafeClient::getSafeClientForInternal($this->config->getGuzzleProxy([
                     'base_uri' => $this->getConfig()->getSetting('XMR_ADDRESS'),
                 ]));
 
@@ -654,7 +680,7 @@ class MaintenanceRegularTask implements TaskInterface
     }
 
     /**
-     * Deletes unused full screen layouts
+     * Remove unused full screen layouts associated with a deleted event
      * @throws NotFoundException
      * @throws GeneralException
      */
@@ -666,6 +692,7 @@ class MaintenanceRegularTask implements TaskInterface
 
         foreach ($this->layoutFactory->query(null, [
             'filterLayoutStatusId' => 3,
+            'removeUnusedFullScreenLayouts' => 1,
             'isFullScreenCampaign' => 1
         ]) as $layout) {
             $count++;

@@ -1,6 +1,6 @@
 <?php
 /*
- * Copyright (C) 2024 Xibo Signage Ltd
+ * Copyright (C) 2026 Xibo Signage Ltd
  *
  * Xibo - Digital Signage - https://xibosignage.com
  *
@@ -22,25 +22,183 @@
 
 namespace Xibo\Widget\Definition;
 
+use Xibo\Support\Exception\InvalidArgumentException;
+
 /**
- * SQL definitions
+ * SQL definitions and boundary-sanitizer for DataSet filter/formula fragments.
+ *
+ * The Xibo DataSet pipeline assembles WHERE-clause fragments from multiple
+ * sources (clause-builder in DataSetDataProviderListener, raw filter on
+ * DataSet entity, RSS feed clause-builder in DataSetRss). Every assembly
+ * path converges at DataSet::getData(), which calls Sql::sanitizeFragment()
+ * — the SINGLE point of sanitization. Per-callsite escaping is unnecessary
+ * and would hide the choke-point pattern.
+ *
+ * cleanup() is the low-level strip-only primitive (recursive keyword
+ * removal, string-literal preservation, comment / hex / binary stripping).
+ * sanitizeFragment() is the throw-on-detection wrapper that production
+ * callers should use.
  */
 class Sql
 {
     const DISALLOWED_KEYWORDS = [
-        ';',
-        'INSERT',
-        'UPDATE',
-        'SELECT',
-        'FROM',
-        'WHERE',
-        'DELETE',
-        'TRUNCATE',
-        'TABLE',
-        'ALTER',
-        'GRANT',
-        'REVOKE',
-        'CREATE',
-        'DROP',
+        ';', '@@', // Reduced symbols, handling comments via regex now
+        'INSERT', 'UPDATE', 'SELECT', 'FROM', 'WHERE', 'DELETE', 'TRUNCATE',
+        'TABLE', 'ALTER', 'GRANT', 'REVOKE', 'CREATE', 'DROP', 'UNION',
+        'HAVING', 'GROUP', 'INTO', 'OUTFILE', 'DUMPFILE', 'PROCEDURE',
+        'SLEEP', 'BENCHMARK', 'INFORMATION_SCHEMA', 'LOAD_FILE', 'LOCK',
+        'EXECUTE', 'PREPARE', 'DEALLOCATE', 'SHOW', 'DESCRIBE', 'EXPLAIN',
+        'CALL', 'HANDLER', 'RENAME', 'SHUTDOWN', 'SET', 'USE', 'FLUSH',
+        'KILL', 'OPTIMIZE', 'REPAIR', 'ANALYZE', 'CHECK', 'CHECKSUM',
+        'GET_LOCK', 'RELEASE_LOCK', 'IS_FREE_LOCK', 'IS_USED_LOCK',
+        'MASTER_POS_WAIT', 'PASSWORD', 'USER', 'SYSTEM_USER', 'SESSION_USER',
+        'CURRENT_USER', 'DATABASE', 'SCHEMA', 'VERSION', 'CONNECTION_ID',
+        'LAST_INSERT_ID', 'ROW_COUNT', 'FOUND_ROWS', 'LOAD_XML', 'NAME_CONST',
+        'DO', 'EXTRACTVALUE', 'UPDATEXML', 'XMLTYPE', 'DBMS_PIPE', 'PG_SLEEP',
+        // Added String Builders & Encoders
+        // we have specific use cases for 'CONCAT', so we keept that
+        'CONCAT_WS', 'CHAR', 'UNHEX', 'HEX', 'ASCII', 'BIN', 'ORD', 'BASE64',
+        // Resource-exhaustion functions
+        'REPEAT', 'SPACE', 'LPAD', 'RPAD', 'RANDOM_BYTES',
+        'SHA', 'SHA1', 'SHA2', 'MD5', 'AES_ENCRYPT', 'AES_DECRYPT',
+        'COMPRESS', 'UNCOMPRESS',
+        // Regex functions (ReDoS risk - unbounded backtracking complexity)
+        'REGEXP_REPLACE', 'REGEXP_SUBSTR', 'REGEXP_LIKE', 'REGEXP_INSTR', 'RLIKE',
     ];
+
+    /**
+     * Validate that a string is safe to use as an unquoted SQL identifier
+     * (table name, column name, etc.).
+     *
+     * Identifiers cannot be bound as PDO parameters, so they have to be
+     * concatenated into SQL strings. The traits in lib/Entity/, lib/Report/, and
+     * lib/Factory/ that accept table/column-name parameters (TagLinkTrait,
+     * EntityTrait, ReportDefaultTrait, TagTrait) route those parameters through
+     * this helper so a future caller that ever passes user-influenced input
+     * fails loudly at the trait boundary rather than producing SQL-identifier
+     * injection at the sink.
+     *
+     * The pattern `^[A-Za-z_][A-Za-z0-9_]*$` matches the standard SQL
+     * identifier syntax (alphanumeric + underscore, starting with a letter or
+     * underscore). It rejects backticks, quotes, whitespace, dots, hyphens,
+     * and every other character that could escape an identifier context.
+     *
+     * @param string $id The identifier to validate.
+     * @param string $context Field name for the error message (e.g. 'table',
+     *                        'column').
+     * @return string The identifier (unchanged) when valid.
+     * @throws InvalidArgumentException If the identifier fails the regex.
+     */
+    public static function validateIdentifier(string $id, string $context): string
+    {
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $id)) {
+            throw new InvalidArgumentException(
+                sprintf(__('Invalid SQL identifier for %s: %s'), $context, $id),
+                $context
+            );
+        }
+        return $id;
+    }
+
+    /**
+     * Throw-on-detection wrapper around cleanup(). Production callers SHOULD use
+     * this rather than cleanup() directly — silently dropping disallowed keywords
+     * masks the attack signal and produces broken SQL fragments downstream.
+     *
+     * @param string $sql The SQL fragment to sanitize.
+     * @param string $context Field name (e.g. 'filter', 'keyword') used in the
+     *                        thrown exception so the caller can identify the
+     *                        offending parameter.
+     * @return string The sanitized fragment (unchanged if no disallowed keywords
+     *                were present).
+     * @throws InvalidArgumentException If the fragment contained any
+     *         DISALLOWED_KEYWORDS, hex/binary literals, or stripped comments.
+     */
+    public static function sanitizeFragment(string $sql, string $context): string
+    {
+        $count = 0;
+        $cleaned = self::cleanup($sql, $count);
+        if ($count > 0) {
+            throw new InvalidArgumentException(
+                sprintf(__('%s contains disallowed keywords'), ucfirst($context)),
+                $context
+            );
+        }
+        return $cleaned;
+    }
+
+    /**
+     * Cleanup SQL (Maximum Paranoia for Legacy Code)
+     *
+     * Low-level strip-only primitive. Prefer sanitizeFragment() — its throw-on-
+     * detection semantics surface attack attempts instead of silently rewriting
+     * to a broken fragment. cleanup() remains public because the DataSet formula
+     * path (DataSet.php:560) intentionally tolerates disallowed keywords by
+     * silently skipping the affected column rather than failing the whole query.
+     *
+     * @param string $sql the SQL to clean
+     * @param int $total the total number of replacements
+     * @return string
+     */
+    public static function cleanup(string $sql, int &$total = 0): string
+    {
+        // 1. EXTRACT AND PROTECT STRING LITERALS (Preserve user data)
+        $strings = [];
+        $placeholderPrefix = '__SQL_STR_';
+        $stringPattern = '/(\'(?:\\\\.|[^\'\\\\])*\'|"(?:\\\\.|[^"\\\\])*")/';
+
+        $sqlCleaned = preg_replace_callback($stringPattern, function ($matches) use (&$strings, $placeholderPrefix) {
+            $id = count($strings);
+            $strings[] = $matches[0];
+            return $placeholderPrefix . $id . '__';
+        }, $sql);
+
+        // 2. STRIP COMMENTS & ENCODINGS (Before keyword checks)
+        $preCleanupPatterns = [
+            '/(?:\/\*.*?\*\/|--[ \t].*?(?:\n|$)|#[^\n]*?(?:\n|$))/s', // Standard & Executable Comments
+            '/\b0x[0-9a-fA-F]+\b/',                                   // Hex literals (e.g., 0x7e)
+            '/\bb\'[01]+\'/i'                                         // Binary literals
+        ];
+        $sqlCleaned = preg_replace($preCleanupPatterns, '', $sqlCleaned, -1, $preCleanupCount);
+        $total += $preCleanupCount;
+
+        // 3. PREPARE KEYWORD PATTERNS
+        $wordKeywords = [];
+        $symbolKeywords = [];
+
+        foreach (self::DISALLOWED_KEYWORDS as $keyword) {
+            if (ctype_alnum(str_replace('_', '', $keyword))) {
+                $wordKeywords[] = preg_quote($keyword, '/');
+            } else {
+                $symbolKeywords[] = $keyword;
+            }
+        }
+
+        $wordPattern = empty($wordKeywords) ? null : '/\b(' . implode('|', $wordKeywords) . ')\b/i';
+
+        // 4. RECURSIVE CLEANUP
+        $count = 0;
+        do {
+            $symbolCount = 0;
+            $wordCount = 0;
+
+            $sqlCleaned = str_ireplace($symbolKeywords, '', $sqlCleaned, $symbolCount);
+
+            if ($wordPattern) {
+                $sqlCleaned = preg_replace($wordPattern, '', $sqlCleaned, -1, $wordCount);
+            }
+
+            $count = $symbolCount + $wordCount;
+            $total += $count;
+        } while ($count > 0);
+
+        // 5. RESTORE STRING LITERALS
+        if (!empty($strings)) {
+            foreach ($strings as $id => $originalString) {
+                $sqlCleaned = str_replace($placeholderPrefix . $id . '__', $originalString, $sqlCleaned);
+            }
+        }
+
+        return trim($sqlCleaned);
+    }
 }

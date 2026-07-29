@@ -63,27 +63,52 @@ class Preview extends Base
     {
         $sanitizedParams = $this->getSanitizer($request->getParams());
 
-        // Get the layout
-        if ($sanitizedParams->getInt('findByCode') === 1) {
-            $layout = $this->layoutFactory->getByCode($id);
-        } else {
-            $layout = $this->layoutFactory->getById($id);
-        }
-
+        // Check token authentication
         /** @var \Lcobucci\JWT\Token $token */
         $token = $request->getAttribute('authedToken');
         if (empty($token)) {
             throw new AccessDeniedException();
         }
 
-        // Check the token allows access to this layout.
-        if (!$token->isPermittedFor('layout') || !$token->isIdentifiedBy($layout->layoutId)) {
+        // Is this token for layout access?
+        if (!$token->isPermittedFor('layout')) {
             throw new AccessDeniedException();
         }
 
-        // Do we want to preview the draft version of this Layout?
-        if ($sanitizedParams->getCheckbox('isPreviewDraft') && $layout->hasDraft()) {
-            $layout = $this->layoutFactory->getByParentId($layout->layoutId);
+        // Get the layout
+        if ($sanitizedParams->getInt('findByCode') === 1) {
+            $this->getlog()->debug('show: findByCode: ' . $id);
+
+            $layout = $this->layoutFactory->getByCode($id);
+
+            // Check that this layout is a navigate to layout action on the layout we're authed against
+            $tokenLayout = $this->layoutFactory->getById($token->claims()->get('jti'));
+            $tokenLayout->load();
+
+            $isActionFound = false;
+            foreach ($tokenLayout->getActions(true) as $action) {
+                if ($action->actionType === 'navLayout' && $action->layoutCode === $layout->code) {
+                    $isActionFound = true;
+                    break;
+                }
+            }
+
+            if (!$isActionFound) {
+                $this->getlog()->debug('show: findByCode: no actions found on authenticated layout '
+                    . $tokenLayout->layoutId);
+                throw new AccessDeniedException();
+            }
+        } else {
+            // Preview of either published or draft layout
+            $this->getlog()->debug('show: getById: ' . $id);
+
+            // If the token isn't for this layout
+            if (!$token->isIdentifiedBy($id)) {
+                throw new AccessDeniedException();
+            }
+
+            // Authed, load the layout
+            $layout = $this->layoutFactory->getById($id);
         }
 
         $this->getState()->template = 'layout-renderer';
@@ -97,11 +122,12 @@ class Preview extends Base
                 ]),
                 'layoutBackgroundDownloadUrl' => TokenAuthMiddleware::sign(
                     $request,
-                    '/preview/layout/background/' . $layout->layoutId,
+                    $this->urlFor($request, 'layout.download.background', ['id' => $layout->layoutId]),
                     time() + 3600,
                     $this->getConfig()->getApiKeyDetails()['encryptionKey'],
                 ),
-                'loaderUrl' => $this->getConfig()->uri('img/loader.gif'),
+                'loaderUrl' => $this->getConfig()->rootUri() . 'img/loader.gif',
+                // We can use layout.preview here because this route is inside the Preview end point
                 'layoutPreviewUrl' => $this->urlFor($request, 'layout.preview', ['id' => '[layoutCode]']),
             ],
             'previewJwt' => $this->jwtService->generateJwt(
@@ -144,10 +170,10 @@ class Preview extends Base
                 throw new AccessDeniedException();
             }
 
-            echo file_get_contents($layout->xlfToDisk([
+            $response->getBody()->write(file_get_contents($layout->xlfToDisk([
                 'notify' => false,
                 'collectNow' => false,
-            ]));
+            ])));
 
             $this->setNoOutput();
         } finally {

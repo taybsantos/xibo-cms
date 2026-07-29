@@ -33,6 +33,9 @@ If not, see <http://www.gnu.org/licenses/>.
 We recommend installing an official release via Docker. Instructions for doing so can be found in our 
 [documentation](https://xibosignage.com/docs/setup/cms-installation-guides).
 
+For self-hosted manual installations without Docker, see [MANUAL_INSTALL.md](MANUAL_INSTALL.md).
+Manual installations are community-supported only and not covered by the official administration manual.
+
 
 # Developing
 
@@ -171,6 +174,13 @@ P: `password`
 ## Translations
 To parse the translations:
 
+React:
+```shell
+cd frontend
+npx i18next-cli extract
+```
+
+Then:
 ```shell
 docker-compose exec web sh -c "cd /var/www/cms; rm -R ./cache"
 docker-compose exec web sh -c "cd /var/www/cms; php bin/locale.php"
@@ -194,11 +204,21 @@ for i in *.po; do msgfmt "$i" -o $(echo $i | sed s/po/mo/); done
 
 Move the resulting `mo` files into your `locale` folder.
 
+The React language packs (`frontend/public/locale/langs/*.json`) are generated from the
+`locale/*.mo` files and are **not** committed, they are build artifacts. `npm run dev` and
+`npm run build` regenerate them automatically, so you normally don't need to do anything. To
+regenerate them manually (e.g. after adding new `mo` files):
+
+  ```bash
+  cd frontend
+  npm run i18n:convert
+  ```
+
 ## Swagger API Docs
 To generate a `swagger.json` file, with the dev containers running:
 
 ```shell
-docker-compose exec web sh -c "cd /var/www/cms; vendor/bin/swagger lib -o web/swagger.json"
+docker-compose exec web sh -c "cd /var/www/cms; vendor/bin/openapi lib -o web/swagger.json"
 ```
 
 ## Application Structure

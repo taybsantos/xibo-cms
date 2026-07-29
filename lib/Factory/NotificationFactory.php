@@ -1,6 +1,6 @@
 <?php
 /*
- * Copyright (C) 2024 Xibo Signage Ltd
+ * Copyright (C) 2026 Xibo Signage Ltd
  *
  * Xibo - Digital Signage - https://xibosignage.com
  *
@@ -34,25 +34,18 @@ use Xibo\Support\Exception\NotFoundException;
  */
 class NotificationFactory extends BaseFactory
 {
-    /** @var  UserGroupFactory */
-    private $userGroupFactory;
-
-    /** @var  DisplayGroupFactory */
-    private $displayGroupFactory;
-
     /**
      * Construct a factory
      * @param User $user
      * @param UserFactory $userFactory
-     * @param UserGroupFactory $userGroupFactory
-     * @param DisplayGroupFactory $displayGroupFactory
      */
-    public function __construct($user, $userFactory, $userGroupFactory, $displayGroupFactory)
-    {
+    public function __construct(
+        $user,
+        $userFactory,
+        private readonly UserGroupFactory $userGroupFactory,
+        private readonly DisplayGroupFactory $displayGroupFactory,
+    ) {
         $this->setAclDependencies($user, $userFactory);
-
-        $this->userGroupFactory = $userGroupFactory;
-        $this->displayGroupFactory = $displayGroupFactory;
     }
 
     /**
@@ -104,17 +97,22 @@ class NotificationFactory extends BaseFactory
     }
 
     /**
-     * Get by Id
+     * Get by ID
      * @param int $notificationId
+     * @param bool $disableUserCheck
      * @return Notification
      * @throws NotFoundException
      */
-    public function getById($notificationId)
+    public function getById(int $notificationId, bool $disableUserCheck = true): Notification
     {
-        $notifications = $this->query(null, ['notificationId' => $notificationId]);
+        $notifications = $this->query(null, [
+            'notificationId' => $notificationId,
+            'disableUserCheck' => $disableUserCheck ? 1 : 0,
+        ]);
 
-        if (count($notifications) <= 0)
+        if (count($notifications) <= 0) {
             throw new NotFoundException();
+        }
 
         return $notifications[0];
     }
@@ -126,12 +124,22 @@ class NotificationFactory extends BaseFactory
      * @return Notification[]
      * @throws NotFoundException
      */
-    public function getBySubjectAndDate($subject, $fromDt, $toDt)
+    public function getBySubjectAndDate(string $subject, int $fromDt, int $toDt): array
     {
-        return $this->query(null, ['subject' => $subject, 'createFromDt' => $fromDt, 'createToDt' => $toDt]);
+        return $this->query(null, [
+            'subject' => $subject,
+            'createFromDt' => $fromDt,
+            'createToDt' => $toDt,
+            'disableUserCheck' => 1,
+        ]);
     }
 
-    public function getByOwnerId($ownerId)
+    /**
+     * @param int $ownerId
+     * @return \Xibo\Entity\Notification[]
+     * @throws \Xibo\Support\Exception\NotFoundException
+     */
+    public function getByOwnerId(int $ownerId): array
     {
         return $this->query(null, ['ownerId' => $ownerId, 'disableUserCheck' => 1]);
     }
@@ -142,14 +150,10 @@ class NotificationFactory extends BaseFactory
      * @return Notification[]
      * @throws NotFoundException
      */
-    public function query($sortOrder = null, array $filterBy = [])
+    public function query($sortOrder = null, array $filterBy = []): array
     {
         $entries = [];
         $sanitizedFilter = $this->getSanitizer($filterBy);
-
-        if (empty($sortOrder)) {
-            $sortOrder = ['subject'];
-        }
 
         $params = [];
         $select = 'SELECT `notification`.notificationId,
@@ -168,6 +172,16 @@ class NotificationFactory extends BaseFactory
         $body = ' FROM `notification` ';
 
         $body .= ' WHERE 1 = 1 ';
+
+        if ($sanitizedFilter->getCheckbox('disableUserCheck') == 0) {
+            // Owned by me, or where I am the audience
+            $body .= ' AND (`notification`.`userId` = :currentUserId OR `notification`.`notificationId` IN (
+              SELECT `notificationId` 
+                FROM `lknotificationuser`
+               WHERE `userId` = :currentUserId 
+            )) ';
+            $params = ['currentUserId' => $this->getUser()->userId];
+        }
 
         if ($sanitizedFilter->getInt('notificationId') !== null) {
             $body .= ' AND `notification`.notificationId = :notificationId ';
@@ -246,11 +260,20 @@ class NotificationFactory extends BaseFactory
             $params['type'] = $sanitizedFilter->getString('type');
         }
 
-        // Sorting?
-        $order = '';
-        if (is_array($sortOrder)) {
-            $order .= 'ORDER BY ' . implode(',', $sortOrder);
-        }
+        // table sorting
+        $allowedColumns = [
+            'subject',
+            'type',
+            'releaseDt',
+            'isInterrupt',
+        ];
+        $sortOrder = $this->buildSortQuery(
+            $sortOrder,
+            $allowedColumns,
+            defaultSort: ['subject ASC']
+        );
+
+        $order = !empty($sortOrder) ? ' ORDER BY ' . implode(', ', $sortOrder) : '';
 
         $limit = '';
         // Paging

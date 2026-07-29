@@ -1,6 +1,6 @@
 <?php
 /*
- * Copyright (C) 2024 Xibo Signage Ltd
+ * Copyright (C) 2026 Xibo Signage Ltd
  *
  * Xibo - Digital Signage - https://xibosignage.com
  *
@@ -29,10 +29,10 @@ use Xibo\Entity\ReportForm;
 use Xibo\Entity\ReportResult;
 use Xibo\Entity\ReportSchedule;
 use Xibo\Factory\DisplayFactory;
+use Xibo\Factory\DisplayGroupFactory;
 use Xibo\Factory\LayoutFactory;
 use Xibo\Factory\MediaFactory;
 use Xibo\Factory\ReportScheduleFactory;
-use Xibo\Factory\DisplayGroupFactory;
 use Xibo\Factory\TagFactory;
 use Xibo\Helper\ApplicationState;
 use Xibo\Helper\DateFormatHelper;
@@ -51,49 +51,17 @@ class ProofOfPlay implements ReportInterface
 {
     use ReportDefaultTrait, DataTablesDotNetTrait;
 
-    /**
-     * @var DisplayFactory
-     */
-    private $displayFactory;
+    private readonly DisplayFactory $displayFactory;
+    private readonly MediaFactory $mediaFactory;
+    private readonly LayoutFactory $layoutFactory;
+    private readonly ReportScheduleFactory $reportScheduleFactory;
+    private readonly DisplayGroupFactory $displayGroupFactory;
+    private readonly TagFactory $tagFactory;
+    private readonly SanitizerService $sanitizer;
 
-    /**
-     * @var MediaFactory
-     */
-    private $mediaFactory;
+    private string $table = 'stat';
 
-    /**
-     * @var LayoutFactory
-     */
-    private $layoutFactory;
-
-    /**
-     * @var ReportScheduleFactory
-     */
-    private $reportScheduleFactory;
-
-    /**
-     * @var DisplayGroupFactory
-     */
-    private $displayGroupFactory;
-
-    /**
-     * @var TagFactory
-     */
-    private $tagFactory;
-
-    /**
-     * @var SanitizerService
-     */
-    private $sanitizer;
-
-    /**
-     * @var ApplicationState
-     */
-    private $state;
-
-    private $table = 'stat';
-
-    private $tagsType = [
+    private array $tagsType = [
         'dg' => 'Display group',
         'media' => 'Media',
         'layout' => 'Layout'
@@ -114,22 +82,15 @@ class ProofOfPlay implements ReportInterface
     }
 
     /** @inheritdoc */
-    public function getReportEmailTemplate()
+    public function getReportEmailTemplate(): string
     {
         return 'proofofplay-email-template.twig';
     }
 
     /** @inheritdoc */
-    public function getSavedReportTemplate()
-    {
-        return 'proofofplay-report-preview';
-    }
-
-    /** @inheritdoc */
-    public function getReportForm()
+    public function getReportForm(): ReportForm
     {
         return new ReportForm(
-            'proofofplay-report-form',
             'proofofplayReport',
             'Proof of Play',
             [
@@ -141,29 +102,7 @@ class ProofOfPlay implements ReportInterface
     }
 
     /** @inheritdoc */
-    public function getReportScheduleFormData(SanitizerInterface $sanitizedParams)
-    {
-        $data = [];
-        $data['type'] = $sanitizedParams->getString('type');
-        $data['tagsType'] = $sanitizedParams->getString('tagsType');
-
-        $exactTags = $sanitizedParams->getCheckbox('exactTags');
-        $data['exactTags'] = $exactTags == 'true';
-
-        $tags = $sanitizedParams->getString('tags');
-        $data['tags'] = $tags;
-
-        $data['hiddenFields'] =  '';
-        $data['reportName'] = 'proofofplayReport';
-
-        return [
-            'template' => 'proofofplay-schedule-form-add',
-            'data' => $data
-        ];
-    }
-
-    /** @inheritdoc */
-    public function setReportScheduleFormData(SanitizerInterface $sanitizedParams)
+    public function setReportScheduleFormData(SanitizerInterface $sanitizedParams): array
     {
         $filter = $sanitizedParams->getString('filter');
         $filterCriteria = [
@@ -205,7 +144,7 @@ class ProofOfPlay implements ReportInterface
     }
 
     /** @inheritdoc */
-    public function generateSavedReportName(SanitizerInterface $sanitizedParams)
+    public function generateSavedReportName(SanitizerInterface $sanitizedParams): string
     {
         $saveAs = sprintf(__('%s report for ', ucfirst($sanitizedParams->getString('filter'))));
 
@@ -286,17 +225,17 @@ class ProofOfPlay implements ReportInterface
     }
 
     /** @inheritdoc */
-    public function restructureSavedReportOldJson($result) // TODO
+    public function restructureSavedReportOldJson($json): array // TODO
     {
         return [
-            'periodStart' => $result['periodStart'],
-            'periodEnd' => $result['periodEnd'],
-            'table' => $result['result'],
+            'periodStart' => $json['periodStart'],
+            'periodEnd' => $json['periodEnd'],
+            'table' => $json['result'],
         ];
     }
 
     /** @inheritdoc */
-    public function getSavedReportResults($json, $savedReport)
+    public function getSavedReportResults($json, $savedReport): ReportResult
     {
         // Get filter criteria
         $rs = $this->reportScheduleFactory->getById($savedReport->reportScheduleId, 1)->filterCriteria;
@@ -328,11 +267,11 @@ class ProofOfPlay implements ReportInterface
     }
 
     /** @inheritdoc */
-    public function getResults(SanitizerInterface $sanitizedParams)
+    public function getResults(SanitizerInterface $sanitizedParams, bool $isJson = false): ReportResult
     {
         $layoutIds = $sanitizedParams->getIntArray('layoutId', ['default' => []]);
         $mediaIds = $sanitizedParams->getIntArray('mediaId', ['default' => []]);
-        $type = strtolower($sanitizedParams->getString('type'));
+        $type = strtolower($sanitizedParams->getString('type') ?? '');
         $tags = $sanitizedParams->getString('tags');
         $tagsType = $sanitizedParams->getString('tagsType');
         $exactTags = $sanitizedParams->getCheckbox('exactTags');
@@ -525,8 +464,10 @@ class ProofOfPlay implements ReportInterface
             $entry['tag'] = $sanitizedRow->getString('tag');
             $entry['numberPlays'] = $sanitizedRow->getInt('numberPlays');
             $entry['duration'] = $sanitizedRow->getInt('duration');
-            $entry['minStart'] = Carbon::createFromTimestamp($row['minStart'])->format(DateFormatHelper::getSystemFormat());
-            $entry['maxEnd'] =  Carbon::createFromTimestamp($row['maxEnd'])->format(DateFormatHelper::getSystemFormat());
+            $entry['minStart'] = Carbon::createFromTimestamp($row['minStart'])
+                ->format(DateFormatHelper::getSystemFormat());
+            $entry['maxEnd'] = Carbon::createFromTimestamp($row['maxEnd'])
+                ->format(DateFormatHelper::getSystemFormat());
             $entry['mediaId'] = $sanitizedRow->getInt('mediaId');
             $entry['displayGroup'] = $sanitizedRow->getString('displayGroup');
             $entry['displayGroupId'] = $sanitizedRow->getInt('displayGroupId');
@@ -600,7 +541,13 @@ class ProofOfPlay implements ReportInterface
                         ON `layout`.layoutId = `layouthistory`.layoutId
                     WHERE `layouthistory`.campaignId = `stat`.campaignId)
               ) AS Layout,
-              IFNULL(`media`.name, IFNULL(`widgetoption`.value, `widget`.type)) AS Media,
+              CASE 
+                 WHEN `stat`.`type` = \'media\' THEN `media`.`Name`
+                 WHEN `stat`.`type` = \'widget\' THEN IFNULL(
+                    `widgethistory`.name,
+                     IFNULL(`widgetoption`.value, `widget`.type)
+                  )
+              END AS Media,
               SUM(stat.count) AS NumberPlays,
               SUM(stat.duration) AS Duration,
               MIN(start) AS MinStart,
@@ -614,9 +561,9 @@ class ProofOfPlay implements ReportInterface
         // We get the ID and name - either by display, display group or tag
         if ($groupBy === 'display') {
             $select .= ', display.Display, stat.displayId ';
-        } else if ($groupBy === 'displayGroup') {
+        } elseif ($groupBy === 'displayGroup') {
             $select .= ', displaydg.displayGroup, displaydg.displayGroupId ';
-        } else if ($groupBy === 'tag') {
+        } elseif ($groupBy === 'tag') {
             if ($tagsType === 'dg' || $tagsType === 'media') {
                 $select .= ', taglink.value, taglink.tagId ';
             } else {
@@ -638,7 +585,10 @@ class ProofOfPlay implements ReportInterface
               LEFT OUTER JOIN `widgetoption`
               ON `widgetoption`.widgetId = `widget`.widgetId
                 AND `widgetoption`.type = \'attrib\'
-                AND `widgetoption`.option = \'name\'
+                AND `widgetoption`.option = \'name\'  
+              LEFT OUTER JOIN `widgethistory`
+              ON `widgethistory`.widgetId = `stat`.widgetId
+                AND `widgethistory`.layoutHistoryId = `layouthistory`.layoutHistoryId
               LEFT OUTER JOIN `media`
               ON `media`.mediaId = `stat`.mediaId
               LEFT OUTER JOIN `campaign`
@@ -662,7 +612,7 @@ class ProofOfPlay implements ReportInterface
                      INNER JOIN `displaygroup` AS displaydg
                         ON displaydg.displaygroupId = linkdg.displaygroupId
                          AND `displaydg`.isDisplaySpecific = 0 ';
-        } else if ($groupBy === 'tag') {
+        } elseif ($groupBy === 'tag') {
             $body .= $this->groupByTagType($tagsType);
         }
 
@@ -858,7 +808,13 @@ class ProofOfPlay implements ReportInterface
                 stat.campaignId,
                 layout.layout, 
                 IFNULL(stat.mediaId, stat.widgetId), 
-                IFNULL(`media`.name, IFNULL(`widgetoption`.value, `widget`.type)),
+                CASE 
+                 WHEN `stat`.`type` = \'media\' THEN `media`.`Name`
+                 WHEN `stat`.`type` = \'widget\' THEN IFNULL(
+                    `widgethistory`.name,
+                     IFNULL(`widgetoption`.value, `widget`.type)
+                  )
+                END,
                 stat.layoutId,
                 stat.mediaId,
                 stat.widgetId
@@ -867,9 +823,9 @@ class ProofOfPlay implements ReportInterface
         // Then add the optional groupings
         if ($groupBy === 'display') {
             $body .= ', display.Display, stat.displayId';
-        } else if ($groupBy === 'displayGroup') {
+        } elseif ($groupBy === 'displayGroup') {
             $body .= ', displaydg.displayGroupId, displaydg.displayGroup';
-        } else if ($groupBy === 'tag') {
+        } elseif ($groupBy === 'tag') {
             $body .= ', value, taglink.tagId';
         }
 
@@ -924,14 +880,14 @@ class ProofOfPlay implements ReportInterface
                             INNER JOIN `lktagdisplaygroup`
                             ON `lktagdisplaygroup`.tagId = tag.tagId
                 ';
-        } else if ($tagsType === 'media') {
+        } elseif ($tagsType === 'media') {
             return ' AND `media`.mediaId '. ($exclude ? 'NOT' : '') . ' IN (
                         SELECT `lktagmedia`.mediaId
                           FROM tag
                             INNER JOIN `lktagmedia`
                             ON `lktagmedia`.tagId = tag.tagId
                 ';
-        } else if ($tagsType === 'layout') {
+        } elseif ($tagsType === 'layout') {
             return ' AND `stat`.campaignId ' . ($exclude ? 'NOT' : '') . ' IN (
                         SELECT 
                             `layouthistory`.campaignId
@@ -1220,7 +1176,7 @@ class ProofOfPlay implements ReportInterface
 
         if ($groupBy === 'tag') {
             $rows = $this->groupByTagMongoDb($rows, $tagsType);
-        } else if ($groupBy === 'displayGroup') {
+        } elseif ($groupBy === 'displayGroup') {
             $rows = $this->groupByDisplayGroupMongoDb($rows, $displayGroupIds);
         }
 
@@ -1307,7 +1263,7 @@ class ProofOfPlay implements ReportInterface
             'media' => 'mediaId',
             'layout' => 'layoutId',
             'dg' => 'displayId',
-        };;
+        };
 
         foreach ($rows as $row) {
             foreach ($tags as $tag) {

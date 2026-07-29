@@ -1,6 +1,6 @@
 <?php
 /*
- * Copyright (C) 2025 Xibo Signage Ltd
+ * Copyright (C) 2026 Xibo Signage Ltd
  *
  * Xibo - Digital Signage - https://xibosignage.com
  *
@@ -24,6 +24,7 @@ use Monolog\Logger;
 use Nyholm\Psr7\ServerRequest;
 use Slim\Http\ServerRequest as Request;
 use Xibo\Factory\ContainerFactory;
+use Xibo\Helper\LibraryFile;
 use Xibo\Helper\LinkSigner;
 use Xibo\Support\Exception\NotFoundException;
 
@@ -207,6 +208,14 @@ if (isset($_GET['file'])) {
         $libraryLocation = $container->get('configService')->getSetting('LIBRARY_LOCATION');
         $cdnUrl = $container->get('configService')->getSetting('CDN_URL');
 
+        // Resolve the library-relative path to an absolute filesystem path and verify
+        // it stays under the library root. Defended today by upstream sanitizers
+        // (BlueImpUploadHandler basename, FontFactory regex strip, #1491 asset-path
+        // prefix validation, integer IDs), but the boundary check here means a
+        // regression in any upstream defense fails loudly at the sink rather than
+        // silently traversing.
+        $resolvedFilePath = LibraryFile::resolve($libraryLocation, $file->path);
+
         // Issue content type header
         $isCss = false;
         if ($file->type === 'L') {
@@ -218,7 +227,7 @@ if (isset($_GET['file'])) {
             $isCss = true;
             header('Content-Type: text/css');
         } else {
-            $contentType = mime_content_type($libraryLocation . $file->path);
+            $contentType = mime_content_type($resolvedFilePath);
             if ($contentType !== false) {
                 header('Content-Type: ' . $contentType);
             }
@@ -230,10 +239,21 @@ if (isset($_GET['file'])) {
             $logger->debug('Rewriting CSS for PWA: ' . $file->path);
 
             // Rewrite CSS for PWAs
-            $cssFile = file_get_contents($libraryLocation . $file->path);
-            $matches = [];
-            preg_match_all('/url\(\'?(.*?)\'?\)/', $cssFile, $matches);
-            foreach ($matches[1] as $match) {
+            $cssFile = file_get_contents($resolvedFilePath);
+
+            // Use callback to modify each match individually (to avoid substituting duplicates more than once)
+            $cssFile = preg_replace_callback('/url\(\'?(.*?)\'?\)/', function ($matches) use (
+                $requiredFileFactory,
+                $displayId,
+                $display,
+                $encryptionKey,
+                $cdnUrl,
+                $file,
+                $logger
+            ) {
+                // Process the match
+                $match = $matches[1];
+
                 // Look up the file to get the right ID/path.
                 try {
                     $replacementFile = $requiredFileFactory->getByDisplayAndDependencyPath($displayId, $match);
@@ -246,29 +266,31 @@ if (isset($_GET['file'])) {
                         $replacementFile->realId,
                         $replacementFile->path,
                         $file->fileType === 'fontCss' ? 'font' : 'asset',
+                        true,
                     );
-                    $cssFile = str_replace(
-                        $match,
-                        $url,
-                        $cssFile,
-                    );
-                } catch (Exception $exception) {
+
+                    return 'url(\'' . $url . '\')';
+                } catch (Exception) {
                     $logger->error('CSS has dependency which does not exist in Required Files: ' . $match);
+                    return $matches[0];
                 }
-            }
+            }, $cssFile);
 
             $file->size = strlen($cssFile);
 
             echo $cssFile;
         } else {
-            $logger->info('HTTP GetFile request redirecting to ' . $libraryLocation . $file->path);
+            $logger->info('HTTP GetFile request redirecting to ' . $resolvedFilePath);
 
             // Normal send
             if ($sendFileMode == 'Apache') {
                 // Send via Apache X-Sendfile header
-                header('X-Sendfile: ' . $libraryLocation . $file->path);
+                header('X-Sendfile: ' . $resolvedFilePath);
             } else if ($sendFileMode == 'Nginx') {
-                // Send via Nginx X-Accel-Redirect
+                // Send via Nginx X-Accel-Redirect. $file->path has already been
+                // validated above (LibraryFile::resolve() raised on traversal/
+                // absolute components) so using it as the Nginx internal-redirect
+                // suffix is safe.
                 header('X-Accel-Redirect: /download/' . $file->path);
             } else {
                 header('HTTP/1.0 404 Not Found');

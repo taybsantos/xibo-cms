@@ -57,11 +57,22 @@
                 $(document).ready(function(){
                     var xiboLayoutRenderer = new XiboLayoutRenderer({{ layoutObj|json_encode()|raw }}, [], {{ xlrOptions|json_encode()|raw }});
     
-                    xiboLayoutRenderer.init().then(function(xlr) {
-                      xlr.playSchedules(xlr);
+                    xiboLayoutRenderer.init().then(async function(xlr) {
+                      await xlr.playSchedules(xlr);
                     });
 
                     window.xlr = xiboLayoutRenderer;
+
+                  // Listen to post messages from the host document.
+                  // BroadcastChannel cannot cross distinct opaque origins in sandboxed iframes,
+                  // so we forward xiboDC messages to child widget iframes via postMessage instead.
+                  window.onmessage = function(e) {
+                    if (e.data.method === 'xiboDC') {
+                      document.querySelectorAll('iframe').forEach(function(iframe) {
+                        iframe.contentWindow.postMessage(e.data.options.data, '*');
+                      });
+                    }
+                  };
                 });
             }(window.jQuery));
         </script>

@@ -32,6 +32,7 @@ use Slim\Http\ServerRequest as Request;
 use Xibo\Helper\ApplicationState;
 use Xibo\Helper\LogoutTrait;
 use Xibo\Helper\Random;
+use Xibo\Helper\SafeRedirect;
 use Xibo\Support\Exception\AccessDeniedException;
 use Xibo\Support\Exception\ConfigurationException;
 use Xibo\Support\Exception\NotFoundException;
@@ -72,9 +73,10 @@ class SAMLAuthentication extends AuthenticationBase
 
         // SAML Login
         $app->get('/saml/login', function (Request $request, Response $response) {
-            // Initiate SAML SSO
+            // Initiate SAML SSO, preserving the originally-requested route (if any) as RelayState.
+            $priorRoute = SafeRedirect::sanitizeRoute($request->getQueryParams()['priorRoute'] ?? null);
             $auth = new Auth($this->getConfig()->samlSettings);
-            return $auth->login();
+            return $auth->login($priorRoute ?: null);
         });
 
         // SAML Logout
@@ -364,11 +366,13 @@ class SAMLAuthentication extends AuthenticationBase
                     }
                 }
 
-                // Redirect back to the originally-requested url, if provided
-                // it is not clear why basename is used here, it seems to be something to do with a logout loop
-                $params =  $request->getParams();
-                $relayState = $params['RelayState'] ?? null;
-                $redirect = empty($relayState) || basename($relayState) === 'login'
+                // Redirect back to the originally-requested url, if provided.
+                // Sanitize RelayState to prevent open redirect, and to guard against a
+                // logout loop when RelayState resolves to a /login* route.
+                $params     = $request->getParams();
+                $relayState = SafeRedirect::sanitizeRoute($params['RelayState'] ?? null, ['/login', '/saml/login']);
+
+                $redirect = empty($relayState)
                     ? $this->getRouteParser()->urlFor('home')
                     : $relayState;
 
@@ -451,9 +455,10 @@ class SAMLAuthentication extends AuthenticationBase
         if ($this->isAjax($request)) {
             return $this->createResponse($request)->withJson(ApplicationState::asRequiresLogin());
         } else {
-            // Initiate SAML SSO
+            // Initiate SAML SSO, preserving the originally-requested route (if any) as RelayState.
+            $priorRoute = SafeRedirect::sanitizeRoute($request->getQueryParams()['priorRoute'] ?? null);
             $auth = new Auth($this->getConfig()->samlSettings);
-            return $this->createResponse($request)->withRedirect($auth->login());
+            return $this->createResponse($request)->withRedirect($auth->login($priorRoute ?: null));
         }
     }
 
